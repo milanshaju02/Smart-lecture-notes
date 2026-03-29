@@ -41,40 +41,49 @@ if os.path.exists(hin_font):
 # ==============================
 
 app = Flask(__name__)
-torch.set_num_threads(4)
+torch.set_num_threads(2)
 
 # ==============================
-# LOAD MODELS
+# LAZY MODEL LOADING
 # ==============================
 
-print("Loading Whisper model...")
+whisper_model = None
+summarizer = None
 
-whisper_model = WhisperModel(
-    "tiny",
-    device="cpu",
-    compute_type="int8"
-)
 
-print("Loading BART summarizer...")
+def get_whisper_model():
+    global whisper_model
+    if whisper_model is None:
+        print("Loading Whisper model...")
+        whisper_model = WhisperModel(
+            "tiny",
+            device="cpu",
+            compute_type="int8"
+        )
+    return whisper_model
 
-summarizer = pipeline(
-    "summarization",
-    model="facebook/bart-large-cnn"
-)
+
+def get_summarizer():
+    global summarizer
+    if summarizer is None:
+        print("Loading summarizer...")
+        summarizer = pipeline(
+            "summarization",
+            model="sshleifer/distilbart-cnn-12-6"
+        )
+    return summarizer
 
 # ==============================
 # CLEAN TRANSCRIPT
 # ==============================
 
 def clean_transcript(text):
-
     sentences = re.split(r'(?<=[.!?]) +', text)
 
     seen = set()
     cleaned = []
 
     for s in sentences:
-
         s = s.strip()
 
         if not s:
@@ -91,11 +100,9 @@ def clean_transcript(text):
 # ==============================
 
 def chunk_text(text, chunk_size=700):
-
     words = text.split()
 
     for i in range(0, len(words), chunk_size):
-
         yield " ".join(words[i:i + chunk_size])
 
 # ==============================
@@ -103,37 +110,34 @@ def chunk_text(text, chunk_size=700):
 # ==============================
 
 def summarize_text(text):
-
+    summarizer_model = get_summarizer()
     chunk_summaries = []
 
     for chunk in chunk_text(text):
-
-        result = summarizer(
+        result = summarizer_model(
             chunk,
-            max_length=220,
-            min_length=100,
+            max_length=180,
+            min_length=70,
             do_sample=False
         )
-
         chunk_summaries.append(result[0]["summary_text"])
 
     combined_summary = " ".join(chunk_summaries)
 
-    final_summary = summarizer(
+    final_result = summarizer_model(
         combined_summary,
-        max_length=350,
-        min_length=180,
+        max_length=250,
+        min_length=120,
         do_sample=False
     )
 
-    return final_summary[0]["summary_text"]
+    return final_result[0]["summary_text"]
 
 # ==============================
 # STRUCTURE NOTES
 # ==============================
 
 def structure_notes(summary_text):
-
     sentences = re.split(r'(?<=[.!?]) +', summary_text)
 
     sections = {
@@ -144,10 +148,9 @@ def structure_notes(summary_text):
         "Conclusion": []
     }
 
-    total = len(sentences)
+    total = len(sentences) if len(sentences) > 0 else 1
 
     for i, sentence in enumerate(sentences):
-
         sentence = sentence.strip()
 
         if not sentence:
@@ -157,16 +160,12 @@ def structure_notes(summary_text):
 
         if ratio < 0.2:
             sections["Introduction"].append(sentence)
-
         elif ratio < 0.5:
             sections["Key Concepts"].append(sentence)
-
         elif ratio < 0.75:
             sections["Important Points"].append(sentence)
-
         elif ratio < 0.9:
             sections["Applications"].append(sentence)
-
         else:
             sections["Conclusion"].append(sentence)
 
@@ -177,9 +176,7 @@ def structure_notes(summary_text):
 # ==============================
 
 def translate_headings(language):
-
     if language == "ml":
-
         return {
             "Introduction": "ആമുഖം",
             "Key Concepts": "പ്രധാന ആശയങ്ങൾ",
@@ -188,8 +185,7 @@ def translate_headings(language):
             "Conclusion": "സമാപനം"
         }
 
-    elif language == "hi":
-
+    if language == "hi":
         return {
             "Introduction": "परिचय",
             "Key Concepts": "मुख्य अवधारणाएँ",
@@ -198,31 +194,26 @@ def translate_headings(language):
             "Conclusion": "निष्कर्ष"
         }
 
-    else:
-
-        return {
-            "Introduction": "Introduction",
-            "Key Concepts": "Key Concepts",
-            "Important Points": "Important Points",
-            "Applications": "Applications",
-            "Conclusion": "Conclusion"
-        }
+    return {
+        "Introduction": "Introduction",
+        "Key Concepts": "Key Concepts",
+        "Important Points": "Important Points",
+        "Applications": "Applications",
+        "Conclusion": "Conclusion"
+    }
 
 # ==============================
 # TRANSLATE SUMMARY
 # ==============================
 
 def translate_summary(text, target_language):
-
     if target_language == "en":
         return text
 
     translated_lines = []
-
     sentences = re.split(r'(?<=[.!?]) +', text)
 
     for sentence in sentences:
-
         sentence = sentence.strip()
 
         if not sentence:
@@ -242,20 +233,17 @@ def translate_summary(text, target_language):
 # ==============================
 
 def generate_pdf(summary_text, language):
-
     pdf_path = os.path.join(OUTPUT_FOLDER, "Lecture_Notes.pdf")
-
     doc = SimpleDocTemplate(pdf_path)
-
     styles = getSampleStyleSheet()
 
     title_style = styles["Heading1"]
     heading_style = styles["Heading2"]
     normal_style = styles["Normal"]
 
-    if language == "ml":
+    if language == "ml" and "MalayalamFont" in pdfmetrics.getRegisteredFontNames():
         font_name = "MalayalamFont"
-    elif language == "hi":
+    elif language == "hi" and "HindiFont" in pdfmetrics.getRegisteredFontNames():
         font_name = "HindiFont"
     else:
         font_name = "Helvetica"
@@ -265,33 +253,27 @@ def generate_pdf(summary_text, language):
     normal_style.fontName = font_name
 
     elements = []
-
     elements.append(Paragraph("AI Generated Lecture Notes", title_style))
     elements.append(Spacer(1, 20))
 
     sections = structure_notes(summary_text)
-
     translated_headings = translate_headings(language)
 
     for title, lines in sections.items():
-
         if not lines:
             continue
 
         heading = translated_headings.get(title, title)
-
         elements.append(Paragraph(heading, heading_style))
         elements.append(Spacer(1, 10))
 
         for line in lines:
-
             elements.append(Paragraph("• " + line, normal_style))
             elements.append(Spacer(1, 8))
 
         elements.append(Spacer(1, 15))
 
     doc.build(elements)
-
     return pdf_path
 
 # ==============================
@@ -302,48 +284,48 @@ def generate_pdf(summary_text, language):
 def home():
     return render_template("index.html")
 
+
+@app.route("/health")
+def health():
+    return "OK", 200
+
+
 @app.route("/process", methods=["POST"])
 def process():
-
     file = request.files.get("audio")
     language = request.form.get("language")
 
     if not file or file.filename == "":
-        return "No file uploaded."
+        return "No file uploaded.", 400
 
     if language not in ["en", "ml", "hi"]:
-        return "Invalid language selected."
+        return "Invalid language selected.", 400
 
     filepath = os.path.join(UPLOAD_FOLDER, "uploaded_audio.mp3")
-
     file.save(filepath)
 
     print("\n===== TRANSCRIBING AUDIO =====\n")
 
-    segments, info = whisper_model.transcribe(filepath, beam_size=5)
+    model = get_whisper_model()
+    segments, info = model.transcribe(filepath, beam_size=1)
 
     transcript = ""
-
     for segment in segments:
         transcript += segment.text + " "
 
     if not transcript.strip():
-        return "Transcription failed."
+        return "Transcription failed.", 500
 
     cleaned = clean_transcript(transcript)
 
     print("Summarizing lecture...")
-
     summary = summarize_text(cleaned)
-
     summary = summary.replace("\n", " ")
 
     print("Translating summary...")
-
     summary = translate_summary(summary, language)
 
     print("Generating PDF...")
-
     pdf_path = generate_pdf(summary, language)
 
     return send_file(pdf_path, as_attachment=True)
@@ -351,6 +333,7 @@ def process():
 # ==============================
 # RUN SERVER
 # ==============================
+
 if __name__ == "__main__":
     print("Starting AI Lecture Notes Server...")
     port = int(os.environ.get("PORT", 10000))
